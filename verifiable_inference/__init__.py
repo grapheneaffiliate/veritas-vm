@@ -22,6 +22,15 @@ from .disclosure import (
 )
 from .merkle import MerkleTree, verify_merkle_proof
 from .prover import Prover
+from .session import (
+    SessionTranscript,
+    StepCertificate,
+    generate,
+    load_transcript,
+    save_transcript,
+    verify_step_inclusion,
+    verify_transcript,
+)
 from .trace import ExecutionTrace, KernelRecord
 from .verifier import VerificationError, Verifier, verify_certificate
 
