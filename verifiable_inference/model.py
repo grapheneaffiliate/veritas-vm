@@ -21,7 +21,18 @@ class ModelConfig:
     d_model: int
     n_layers: int
     max_seq_len: int
+    n_heads: int = 1
     dtype: str = "<f8"  # canonical little-endian float64
+
+    def __post_init__(self) -> None:
+        if self.d_model % self.n_heads != 0:
+            raise ValueError(
+                f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
+            )
+
+    @property
+    def d_head(self) -> int:
+        return self.d_model // self.n_heads
 
     def to_dict(self) -> dict:
         return {
@@ -29,6 +40,7 @@ class ModelConfig:
             "d_model": int(self.d_model),
             "n_layers": int(self.n_layers),
             "max_seq_len": int(self.max_seq_len),
+            "n_heads": int(self.n_heads),
             "dtype": str(self.dtype),
         }
 
@@ -39,6 +51,7 @@ class ModelConfig:
             d_model=int(d["d_model"]),
             n_layers=int(d["n_layers"]),
             max_seq_len=int(d["max_seq_len"]),
+            n_heads=int(d.get("n_heads", 1)),
             dtype=str(d.get("dtype", "<f8")),
         )
 
@@ -164,14 +177,33 @@ def _embed(tokens: np.ndarray, model: ModelWeights) -> np.ndarray:
     return out
 
 
-def _attention_block(x: np.ndarray, layer: LayerWeights, d_model: int) -> np.ndarray:
-    """Pre-LN single-head self-attention block."""
+def _attention_block(
+    x: np.ndarray, layer: LayerWeights, d_model: int, n_heads: int
+) -> np.ndarray:
+    """Pre-LN multi-head self-attention block. ``n_heads == 1`` recovers
+    the single-head path bit-for-bit."""
     norm = K.layernorm(x, layer.ln1_w, layer.ln1_b)
     qkv = K.linear(norm, layer.qkv_w, layer.qkv_b)
-    q = qkv[:, 0:d_model].copy()
-    k = qkv[:, d_model : 2 * d_model].copy()
-    v = qkv[:, 2 * d_model : 3 * d_model].copy()
-    attn_out = K.attention(q, k, v, causal=True)
+    q_full = qkv[:, 0:d_model]
+    k_full = qkv[:, d_model : 2 * d_model]
+    v_full = qkv[:, 2 * d_model : 3 * d_model]
+
+    seq = x.shape[0]
+    d_head = d_model // n_heads
+    head_outs: list[np.ndarray] = []
+    for h in range(n_heads):
+        s = h * d_head
+        e = s + d_head
+        q_h = np.ascontiguousarray(q_full[:, s:e])
+        k_h = np.ascontiguousarray(k_full[:, s:e])
+        v_h = np.ascontiguousarray(v_full[:, s:e])
+        head_outs.append(K.attention(q_h, k_h, v_h, causal=True))
+    if n_heads == 1:
+        attn_out = head_outs[0]
+    else:
+        attn_out = np.empty((seq, d_model), dtype=x.dtype)
+        for h, ho in enumerate(head_outs):
+            attn_out[:, h * d_head : (h + 1) * d_head] = ho
     proj = K.linear(attn_out, layer.out_w, layer.out_b)
     return K.add(x, proj)
 
@@ -194,7 +226,7 @@ def forward(tokens: np.ndarray, model: ModelWeights) -> np.ndarray:
         raise ValueError(f"forward expects 1D token array, got {tokens.shape}")
     x = _embed(tokens, model)
     for layer in model.layers:
-        x = _attention_block(x, layer, model.config.d_model)
+        x = _attention_block(x, layer, model.config.d_model, model.config.n_heads)
         x = _mlp_block(x, layer)
     x = K.layernorm(x, model.ln_f_w, model.ln_f_b)
     logits = K.linear(x, model.unembed_w, model.unembed_b)
