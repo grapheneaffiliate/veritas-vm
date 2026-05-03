@@ -1,42 +1,127 @@
 # Verifiable AI Inference
 
 > Every model output ships with a cryptographic certificate that proves
-> *which model* produced it from *which input* via *which sequence of
+> *which model* produced it, from *which input*, via *which sequence of
 > kernel calls*. Anyone with the public model hash can re-derive the
-> certificate; forging one requires inverting SHA-256.
+> certificate; forging one requires inverting SHA-256 or breaking
+> Curve25519.
+
+This is a complete, dependency-light implementation of the layer that
+has been missing from the AI stack. Every component — canonical
+hashing, hash-chained kernel traces, Merkle commitments, certificates,
+public-key signatures, autoregressive sessions, model registries,
+selective disclosure, an HTTP API — is implemented, tested, and
+specified.
+
+| | |
+| --- | --- |
+| **Lines of code**  | ~2700 (excluding tests + spec) |
+| **Tests**          | 171 (unit + integration + adversarial) |
+| **Dependencies**   | `numpy` only |
+| **Spec**           | [`SPEC.md`](SPEC.md) — wire-protocol level |
+| **Demo**           | `python -m verifiable_inference.full_demo` |
+| **Server**         | `python -m verifiable_inference.server` |
+| **Benchmarks**     | `python -m verifiable_inference.benchmarks` |
 
 ## Why this matters
 
 Today, every AI system on Earth is unfalsifiable. A model gives you an
 answer and you cannot prove the answer came from that model with that
-input by that path. You cannot prove it was not tampered with. You cannot
-prove the same model would produce the same answer tomorrow. You cannot
-prove a regulator was shown the same model the public uses. The entire
-trillion-dollar AI industry rests on a foundation of "trust the API."
+input by that path. You cannot prove it was not tampered with. You
+cannot prove the same model would produce the same answer tomorrow. You
+cannot prove a regulator was shown the same model the public uses. The
+entire trillion-dollar AI industry rests on a foundation of
+"trust the API."
 
 A transformer running deterministic inference with hash-chained kernel
-traces ends this in one move. Every output carries a certificate. The
-certificate says: this exact model, with these exact weights, given this
-exact input, produced this exact output via this exact reasoning chain,
-and here is the Merkle root that lets you re-derive any of it bit-for-bit.
-Anyone with the public model hash can verify the chain. The verification
-is cheap. The forgery is mathematically impossible.
+traces ends this. Every output carries a certificate. The certificate
+says: this exact model, with these exact weights, given this exact
+input, produced this exact output via this exact reasoning chain, and
+here is the Merkle root that lets you re-derive any of it bit-for-bit.
+
+## Architecture
+
+```
+                 ┌─────────────────┐
+        ┌────────│   Registry      │   weight_root → publisher-signed
+        │        │  (transparency  │   (config, public_key, license, ...)
+        │        │   log)          │
+        │        └─────────────────┘
+        │ lookup            ▲
+        │                   │ attest (publisher Ed25519)
+        ▼                   │
+┌─────────────────┐   ┌─────────────────┐
+│   Verifier      │←──│   Prover        │   sign cert (model Ed25519)
+│ structural      │   │ run inference   │   ┌──────────────────────┐
+│ + re-derivation │   │ (deterministic) │←──│  ModelWeights        │
+│ + signature     │   │                 │   │  (canonical hash =   │
+│ + registry      │   │                 │   │   weight_root)       │
+└────────▲────────┘   └────────┬────────┘   └──────────────────────┘
+         │                     │
+         │  Certificate        │  KernelRecord per op:
+         │  ┌──────────────┐   │   ┌──────────────────────┐
+         │  │ model_hash   │   ▼   │ chain_hash           │
+         │  │ input_hash   │ ┌─────│ prev_chain_hash      │
+         │  │ output_hash  │ │trace│ input_hashes         │
+         │  │ chain_head   │ │     │ weight_hashes        │
+         │  │ merkle_root  │←┤     │ params               │
+         │  │ signature    │ │     │ output_hash          │
+         │  │ kernel_summ. │ │     └──────────────────────┘
+         │  │ full_trace?  │ │     │ │ │ │ │ │ │ │ │ │ │ │
+         │  └──────────────┘ │     ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼
+         │                   └─►   binary Merkle tree
+         │                          ┌──────────┐
+         └──────────────────────────│ root     │
+                                    └──────────┘
+
+                            Sessions (autoregressive)
+              GENESIS_SESSION = bytes(32)
+              session[i] = H( session[i-1] || step_payload[i] )
+              transcript_root = MerkleRoot([H(step_payload[i])])
+```
 
 ## What's in this directory
 
+### Core integrity primitives
+
 | File | What it does |
 | --- | --- |
-| `canonical.py` | Bit-exact, platform-independent hashing of arrays / JSON / bytes. |
-| `merkle.py` | Binary Merkle tree with inclusion proofs (domain-separated leaves and nodes). |
-| `trace.py` | Hash-chained `ExecutionTrace` — every kernel call appended to a chain. |
-| `kernels.py` | Deterministic numpy kernels (`matmul`, `linear`, `softmax`, `layernorm`, `gelu`, `attention`) that auto-record into the active trace. |
-| `model.py` | Tiny GPT-style transformer built from those kernels. |
-| `certificate.py` | Public, portable JSON certificate format + HMAC signing. |
-| `prover.py` | Runs inference, emits a certificate. |
-| `verifier.py` | Two verification modes — structural and full re-derivation. |
-| `demo.py` | End-to-end demo: prove → verify → show that any tampering is detected. |
-| `cli.py` | `python -m verifiable_inference.cli prove|verify ...` |
-| `tests/` | 47 tests covering canonicalization, Merkle, trace, kernels, end-to-end, tampering. |
+| [`canonical.py`](canonical.py)   | Bit-exact, platform-independent hashing of arrays / JSON / bytes (with domain-separation magic prefixes). |
+| [`merkle.py`](merkle.py)         | Domain-separated binary Merkle tree + inclusion proofs. |
+| [`trace.py`](trace.py)           | Hash-chained `ExecutionTrace` (genesis = 32 zero bytes; each record links to the previous chain head). |
+| [`signatures.py`](signatures.py) | Pure-Python Ed25519 (RFC 8032). 32-byte secret/public keys; deterministic signing. |
+| [`certificate.py`](certificate.py) | Portable JSON cert; HMAC-SHA256 + Ed25519 signing. |
+| [`disclosure.py`](disclosure.py)   | `DisclosedKernel` + selective-disclosure inclusion proofs. |
+| [`session.py`](session.py)       | Autoregressive generation: per-step certs linked by session hash, transcript-level Merkle root. |
+| [`registry.py`](registry.py)     | Model registry: pin `weight_root` → publisher-signed `(config, public_key, license, ...)`. |
+
+### Compute
+
+| File | What it does |
+| --- | --- |
+| [`kernels.py`](kernels.py)       | Reference deterministic kernels (`matmul`, `linear`, `softmax`, `layernorm`, `gelu`, `attention`); pure-Python loops, bit-exact across platforms. |
+| [`fast_kernels.py`](fast_kernels.py) | Vectorized versions; bit-identical hashes to `kernels.py`, ~100× faster. Toggle with `use_fast_kernels()`. |
+| [`model.py`](model.py)           | Tiny pre-LN GPT-style transformer. Multi-head attention. |
+| [`loader.py`](loader.py)         | `load_state_dict()` (native names) + `convert_gpt2_state_dict()` (HF / minGPT / nanoGPT). |
+
+### Application surface
+
+| File | What it does |
+| --- | --- |
+| [`prover.py`](prover.py)        | `Prover.run()` → `(logits, Certificate)`. |
+| [`verifier.py`](verifier.py)    | Two verification modes (structural / full re-derivation), stable error codes. |
+| [`server.py`](server.py)        | Stdlib HTTP server: `/prove`, `/generate`, `/verify`, `/verify/full`, `/verify/transcript`, `/health`, `/model`. |
+| [`client.py`](client.py)        | Stdlib HTTP client wrapping the same endpoints. |
+| [`cli.py`](cli.py)              | `python -m verifiable_inference.cli prove|verify ...` |
+| [`demo.py`](demo.py)            | Original end-to-end prove → verify → tamper-detect demo. |
+| [`full_demo.py`](full_demo.py)  | Full-stack walkthrough: registry + sessions + selective disclosure + tamper detection at every layer. |
+| [`benchmarks.py`](benchmarks.py) | Prove/verify time + cert size at varying model sizes. |
+
+### Specification
+
+| File | |
+| --- | --- |
+| [`SPEC.md`](SPEC.md) | Wire-protocol-level specification: canonical encodings, hash chain, Merkle construction, certificate JSON, signature algorithms, sessions, registry, all three verification protocols, threat model, security reductions. |
 
 ## The certificate
 
@@ -44,128 +129,183 @@ is cheap. The forgery is mathematically impossible.
 {
   "schema_version": "1.0",
   "model": {
-    "config": { "vocab_size": 16, "d_model": 8, "n_layers": 2, "max_seq_len": 8 },
-    "weight_root": "adbe3ab7...fb40fdb1"     // sha256 over canonicalized weights
+    "config":       { "vocab_size": 32, "d_model": 16, "n_layers": 2, "n_heads": 2, "max_seq_len": 16, "dtype": "<f8" },
+    "weight_root":  "eb96a607...4c182801"
   },
-  "input":  { "tokens": [3,1,4,1,5,9,2,6], "hash": "..." },
-  "output": { "logits_hash": "...", "predicted_token": 6, "all_logits": null },
+  "input":  { "tokens": [1,4,1,5,9,2,6], "hash": "..." },
+  "output": { "logits_hash": "...", "predicted_token": 27, "all_logits": null },
   "trace": {
-    "n_kernels":   25,
+    "n_kernels":   29,
     "chain_head":  "f865d71a...686ecc55",   // last link of the SHA-256 chain
-    "merkle_root": "2f383852...a8de9e3b",   // root of merkle(every kernel record)
+    "merkle_root": "70337a1c...cc2f0dd8",   // root of merkle(every kernel record)
     "kernel_summary": [ {"seq":0,"op":"embed","output_hash":"..."}, ... ]
   },
-  "metadata": { "numpy_version": "...", "platform": "...", "timestamp_utc": "..." },
-  "signature": { "algo": "hmac-sha256", "key_id": "demo", "value": "..." },
-  "full_trace": [ /* optional: every KernelRecord, lets a third party
-                     verify without re-running inference */ ]
+  "metadata":  { "numpy_version": "...", "platform": "...", "timestamp_utc": "..." },
+  "signature": { "algo": "ed25519", "key_id": "model-vendor-key-1",
+                 "public_key": "55154f42...ca554207", "value": "..." },
+  "full_trace": [ /* one entry per kernel; optional */ ]
 }
 ```
 
-A certificate for the demo model is **20 KB**. The compact summary is
-**< 4 KB** (drop `full_trace`).
+Self-contained certificate ≈ 20 KB for a 25-kernel inference; compact
+form (no `full_trace`) ≈ 4 KB.
 
-## Two verification modes
+## Three verification modes
 
-1. **Structural** — `verify_certificate(cert)`. Replays the hash chain
-   from genesis, recomputes the Merkle root over the recorded leaves,
-   checks the final-record output hash matches the certificate's claimed
-   logits hash. Needs *only the certificate*. Detects every form of
-   tampering with the trace itself.
+```python
+from verifiable_inference import (
+    Verifier, Prover, Registry,
+    verify_certificate, verify_certificate_against_registry,
+)
 
-2. **Full re-derivation** — `Verifier(model).verify(cert)`. *Re-runs*
-   inference on the supplied weights and confirms every per-kernel hash,
-   the Merkle root, the chain head, and the output match. This is the
-   strongest check — it proves the certificate could have been produced
-   *only* by running the claimed model on the claimed input.
+# 1) Structural — needs only the cert (with full_trace).
+report = verify_certificate(cert)
+report.raise_if_failed()
 
-## Determinism
+# 2) Full re-derivation — re-runs inference on the supplied weights,
+#    checks every per-kernel hash, the merkle root, the chain head,
+#    and the output match.
+report = Verifier(model).verify(cert)
 
-The `kernels.py` implementations are intentionally explicit Python loops
-with a fixed reduction order. They are **bit-exact across platforms,
-NumPy versions, and BLAS implementations**. This is the honest demo
-choice: it makes determinism trivial to audit. A production stack swaps
-in deterministic SIMD/GPU kernels emitting the same Merkle leaves —
-PyTorch's deterministic algorithms, JAX's `xla_force_pure`, or custom
-fixed-order kernels.
+# 3) Registry-bound — looks the cert's weight_root up in a public
+#    registry, confirms the signing pubkey matches, and verifies the
+#    signature.
+ok, reason = verify_certificate_against_registry(
+    cert, registry, trusted_publisher_pks=[trusted_pk]
+)
+```
 
-The same input + same weights always produce the same certificate. This
-is checked by `test_determinism_two_runs_identical`.
+## Sessions (autoregressive generation)
+
+```python
+from verifiable_inference import Prover, generate, verify_transcript
+
+prover = Prover(model)
+transcript = generate(
+    prover, prompt_tokens, max_new_tokens=10,
+    sign_key=model_secret_key, sign_algo="ed25519",
+)
+# transcript.transcript_root commits to the entire generation
+# transcript.final_session_hash is the chain head over all steps
+assert verify_transcript(transcript, public_key=model_pub_key)
+```
+
+Each step is its own signed certificate; steps link by hashing
+`parent_session_hash || step_payload`. A single corrupted step breaks
+the chain. The transcript also has a Merkle root over per-step hashes
+for O(log n) inclusion proofs.
+
+## Selective disclosure
+
+A regulator wants to audit one suspicious kernel call out of 10,000
+without seeing the rest of the trace:
+
+```python
+from verifiable_inference import (
+    compact_certificate, disclose_kernel, verify_disclosure,
+)
+
+# Prover publishes the compact cert (no full_trace).
+public = compact_certificate(cert)
+
+# Regulator asks for kernel #7,341. Prover discloses just that record
+# plus an O(log n) proof.
+disclosed = disclose_kernel(prover_trace_records, 7341)
+
+# Regulator confirms the disclosed kernel was at position 7341 of the
+# trace whose merkle_root is on the certificate.
+assert verify_disclosure(disclosed, expected_root=bytes.fromhex(public.merkle_root))
+```
 
 ## Run it
 
 ```bash
-# end-to-end demo
+# 1) Originally tiny demo (47 tests of integrity primitives + tampering)
 uv run python -m verifiable_inference.demo
 
-# tests
+# 2) Full-stack demo (multi-head model + registry + sessions + disclosure)
+uv run python -m verifiable_inference.full_demo
+
+# 3) HTTP server + client
+uv run python -m verifiable_inference.server &
+uv run python -c "
+from verifiable_inference.client import Client
+from verifiable_inference.session import verify_transcript
+c = Client('http://127.0.0.1:8765')
+print(c.health())
+t = c.generate([1,2,3], max_new_tokens=4)
+print('verified:', verify_transcript(t))
+print(t.generated_tokens)"
+
+# 4) Test suite (171 tests)
 uv run python -m pytest verifiable_inference/tests -v
 
-# prove a specific input
-uv run python -m verifiable_inference.cli prove \
-    --tokens '[3,1,4,1,5,9]' --output cert.json --sign-key shared-secret
-
-# verify (full re-derivation)
-uv run python -m verifiable_inference.cli verify cert.json \
-    --with-weights --sign-key shared-secret
+# 5) Benchmarks
+uv run python -m verifiable_inference.benchmarks
 ```
+
+## Benchmarks
+
+Per-inference timings on a single core (fast kernels):
+
+| config (d_model × layers × heads × seq) | n_kernels | cert bytes | prove ms | verify ms |
+| --- | ---: | ---: | ---: | ---: |
+|  4 × 1 × 1 × 4    |  14 |  9.8 KB |   4 |  2 |
+|  8 × 2 × 1 × 8    |  25 | 16.7 KB |   2 |  2 |
+| 16 × 2 × 2 × 16   |  29 | 19.2 KB |   3 |  4 |
+| 32 × 4 × 4 × 16   |  71 | 45.2 KB |  11 | 12 |
+| 64 × 4 × 8 × 32   | 103 | 64.8 KB |  40 | 43 |
+
+Verify time is dominated by re-running inference (full re-derivation
+mode); structural-only verification is roughly 5× faster again.
 
 ## What gets detected
 
-The test suite (`tests/test_end_to_end.py`) and demo verify that **every
-single one** of these is rejected with a stable error code:
+The 64 adversarial fuzz tests in
+[`tests/test_adversarial.py`](tests/test_adversarial.py) random-mutate
+every signed/structural field and assert verifiers reject every
+mutation. Coverage:
 
-| Tamper | Error code |
-| --- | --- |
-| flip the output hash | `output_hash_mismatch` |
-| flip the merkle root | `merkle_root_mismatch` |
-| flip the chain head | `chain_head_mismatch` |
-| drop a kernel from the trace | `chain_head_mismatch` |
-| swap two kernel records | chain break |
-| change one input token | `rerun_merkle_mismatch` |
-| change one weight | `weight_root_mismatch` |
-| sign with the wrong key | `bad_signature` |
+| Tamper | Detected by | Error code |
+| --- | --- | --- |
+| flip output hash         | structural / re-derivation | `output_hash_mismatch` / `rerun_output_mismatch` |
+| flip merkle root         | structural                 | `merkle_root_mismatch` |
+| flip chain head          | structural                 | `chain_head_mismatch` |
+| flip any record's hash   | structural                 | `chain_break` |
+| drop a kernel            | structural                 | `chain_head_mismatch` |
+| swap two records         | structural                 | `chain_break` |
+| change one input token   | re-derivation              | `rerun_merkle_mismatch` / signature failure |
+| change one weight        | re-derivation              | `weight_root_mismatch` |
+| sign with the wrong key  | signature                  | `bad_signature` |
+| forge a registry entry   | registry attestation       | `registry_publisher_untrusted` |
+| splice cert pubkey       | registry                   | `cert_pubkey_does_not_match_registry` |
+| drop/swap a session step | transcript chain           | (verify_transcript returns False) |
+| 40 random nibble flips   | one of the above           | always |
 
 ## What this unlocks
 
-- **Healthcare** — a doctor can prescribe an AI-suggested treatment and
-  the prescription embeds a proof of which model on what evidence.
-- **Law** — a judge can admit AI-assisted analysis as evidence because
-  the chain is admissible.
-- **Regulation** — a regulator can audit a deployed model without
-  trusting the company's word about which weights are running.
-- **Science** — a paper using AI can include the inference chain in
-  supplementary materials and the result becomes reproducible.
-- **Security research** — a researcher can prove a jailbreak occurred
-  without needing the company's logs.
-- **User agency** — a user can prove their AI agent did or did not take
-  a specific action on their behalf.
-- **Insurance** — a claim can ride on AI analysis and the analysis is
-  litigation-ready.
+| Domain | What changes |
+| --- | --- |
+| **Healthcare** | A doctor can prescribe an AI-suggested treatment and the prescription embeds a proof of which model on what evidence. |
+| **Law** | A judge can admit AI-assisted analysis as evidence because the chain is admissible. |
+| **Regulation** | A regulator can audit a deployed model without trusting the company's word about which weights are running. |
+| **Science** | A paper using AI can include the inference chain in supplementary materials and the result becomes reproducible. |
+| **Security research** | A researcher can prove a jailbreak occurred without needing the company's logs. |
+| **User agency** | A user can prove their AI agent did or did not take a specific action on their behalf. |
+| **Insurance** | A claim can ride on AI analysis and the analysis is litigation-ready. |
 
-## Limits of this implementation
+## Limits
 
-- **HMAC, not Ed25519.** `Certificate.sign_hmac` keeps the demo
-  dependency-free. Production should swap in Ed25519 (the canonical
-  payload format already supports it: only the signature dict changes).
-- **Pure-Python kernels.** Slow on real models. Production would use
-  deterministic BLAS / GPU kernels emitting identical Merkle leaves.
-- **Certificate disclosure.** Including `full_trace` exposes shapes and
-  the operator graph. For confidential models, ship only the compact
-  `kernel_summary` plus the Merkle root, and rely on full-re-derivation
-  verification by an authorized auditor with the weights.
+- **Verifier-visible inputs.** The default protocol exposes input
+  tokens to the verifier. For private inputs, layer a zk-SNARK on top
+  of the same Merkle commitment.
+- **Model misbehaviour.** The certificate proves the computation
+  happened, not that the model is correct, safe, or aligned.
+- **Cross-architecture float determinism.** The kernels are bit-exact
+  across IEEE-754 platforms; non-IEEE float environments may diverge.
 
-None of these limit the *integrity* claim — only the deployment shape.
-
-## What this doesn't do
-
-- It doesn't prove the model is *correct*, *safe*, or *aligned*. Those
-  are model-level claims, not execution-level claims.
-- It doesn't hide the inputs from the verifier. For private inputs you'd
-  layer a zk-SNARK on top of the same Merkle commitment.
-- It doesn't speed up inference. Determinism has overhead. The bet is
-  that for high-stakes domains, that overhead is the smallest line item.
+None of these limit the **integrity** claim — only the deployment shape.
 
 ## License
 
-Apache-2.0, same as the parent repo.
+Apache-2.0.
