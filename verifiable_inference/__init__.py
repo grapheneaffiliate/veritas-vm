@@ -13,6 +13,7 @@ recomputed Merkle root matches. Forgery requires inverting SHA-256.
 
 from . import server, signatures
 from .client import Client, ClientError
+from .registry import Registry, RegistryEntry, verify_certificate_against_registry
 from .canonical import canonical_array_bytes, hash_array, hash_bytes, hash_json
 from .certificate import Certificate, load_certificate, save_certificate
 from .disclosure import (
