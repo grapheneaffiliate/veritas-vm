@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from . import signatures as ed25519
 from .canonical import canonical_json_bytes, hash_array
 from .trace import KernelRecord
 
@@ -113,24 +114,56 @@ class Certificate:
         return canonical_json_bytes(payload)
 
     def sign_hmac(self, key: bytes, key_id: str = "default") -> None:
-        """Mutate ``self.signature`` to a HMAC-SHA256 over the canonical payload.
+        """HMAC-SHA256 signature. Symmetric — the verifier needs the same key.
 
-        HMAC was chosen to keep the demo dependency-free; production users
-        should swap in Ed25519 by writing a new ``sign_*`` method and a
-        matching verifier in :func:`verify_signature`.
-        """
+        Useful for trusted-pair settings (e.g. proving to your own auditor).
+        For public verifiability use :meth:`sign_ed25519` instead."""
         mac = hmac.new(key, self.signed_payload_bytes(), hashlib.sha256).digest()
         self.signature = {"algo": "hmac-sha256", "key_id": key_id, "value": mac.hex()}
 
-    def verify_signature(self, key: bytes) -> bool:
+    def sign_ed25519(self, secret_key: bytes, key_id: str = "default") -> bytes:
+        """Ed25519 signature. Asymmetric — the verifier only needs the
+        public key, which can be published anywhere.
+
+        Returns the 32-byte public key derived from ``secret_key`` so
+        callers can publish it alongside the certificate.
+        """
+        public_key = ed25519.derive_public_key(secret_key)
+        sig = ed25519.sign(self.signed_payload_bytes(), secret_key)
+        self.signature = {
+            "algo": "ed25519",
+            "key_id": key_id,
+            "public_key": public_key.hex(),
+            "value": sig.hex(),
+        }
+        return public_key
+
+    def verify_signature(self, key: bytes | None = None) -> bool:
+        """Verify against the certificate's claimed algorithm.
+
+        - ``algo == "none"``  → always True
+        - ``algo == "hmac-sha256"``  → ``key`` must be the shared secret
+        - ``algo == "ed25519"``      → ``key`` is optional; if supplied,
+            it must equal the certificate's stored ``public_key`` (this
+            lets a verifier *pin* a specific key). If omitted, the stored
+            public_key is trusted (use the model registry to look it up).
+        """
         algo = self.signature.get("algo")
         if algo == "none":
             return True
-        if algo != "hmac-sha256":
-            raise ValueError(f"unsupported signature algo: {algo!r}")
-        expected = hmac.new(key, self.signed_payload_bytes(), hashlib.sha256).digest()
-        got = bytes.fromhex(self.signature["value"])
-        return hmac.compare_digest(expected, got)
+        if algo == "hmac-sha256":
+            if key is None:
+                raise ValueError("hmac-sha256 requires a shared key")
+            expected = hmac.new(key, self.signed_payload_bytes(), hashlib.sha256).digest()
+            got = bytes.fromhex(self.signature["value"])
+            return hmac.compare_digest(expected, got)
+        if algo == "ed25519":
+            stored_pk = bytes.fromhex(self.signature["public_key"])
+            if key is not None and key != stored_pk:
+                return False  # caller pinned a different key than the cert claims
+            sig = bytes.fromhex(self.signature["value"])
+            return ed25519.verify(self.signed_payload_bytes(), sig, stored_pk)
+        raise ValueError(f"unsupported signature algo: {algo!r}")
 
 
 def save_certificate(cert: Certificate, path: str) -> None:

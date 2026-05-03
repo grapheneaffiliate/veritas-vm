@@ -50,6 +50,7 @@ class Prover:
         include_full_trace: bool = True,
         include_logits: bool = False,
         sign_key: Optional[bytes] = None,
+        sign_algo: str = "hmac-sha256",
         key_id: str = "default",
     ) -> tuple[np.ndarray, Certificate]:
         """Execute inference under a fresh trace; return ``(logits, certificate)``."""
@@ -87,6 +88,11 @@ class Prover:
             full_trace=full_trace,
         )
         if sign_key is not None:
-            cert.sign_hmac(sign_key, key_id=key_id)
+            if sign_algo == "hmac-sha256":
+                cert.sign_hmac(sign_key, key_id=key_id)
+            elif sign_algo == "ed25519":
+                cert.sign_ed25519(sign_key, key_id=key_id)
+            else:
+                raise ValueError(f"unsupported sign_algo: {sign_algo!r}")
 
         return logits, cert

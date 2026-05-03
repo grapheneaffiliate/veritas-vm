@@ -11,6 +11,7 @@ weights and the certificate can re-run the inference and check that the
 recomputed Merkle root matches. Forgery requires inverting SHA-256.
 """
 
+from . import signatures
 from .canonical import canonical_array_bytes, hash_array, hash_bytes, hash_json
 from .certificate import Certificate, load_certificate, save_certificate
 from .merkle import MerkleTree, verify_merkle_proof
