@@ -1,0 +1,59 @@
+[project]
+name = "veritas-vm"
+version = "0.1.0"
+description = "Verifiable AI inference: every model output ships with a cryptographic certificate."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "veritas-vm contributors" }]
+keywords = [
+    "verifiable-inference",
+    "deterministic-inference",
+    "transformer",
+    "merkle",
+    "ed25519",
+    "ai-audit",
+    "cryptographic-attestation",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/grapheneaffiliate/veritas-vm"
+Repository = "https://github.com/grapheneaffiliate/veritas-vm"
+Issues = "https://github.com/grapheneaffiliate/veritas-vm/issues"
+
+[project.scripts]
+veritas-prove = "verifiable_inference.cli:main"
+veritas-server = "verifiable_inference.server:main"
+veritas-demo = "verifiable_inference.full_demo:main"
+veritas-benchmark = "verifiable_inference.benchmarks:main"
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["verifiable_inference*"]
+
+[tool.pytest.ini_options]
+testpaths = ["verifiable_inference/tests"]
+addopts = "-v --tb=short"
